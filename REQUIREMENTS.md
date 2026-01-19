@@ -1,5 +1,5 @@
 # ERP Integration Specification: Digital Sales Interface Synchronization
-**Version:** 5.0.0
+**Version:** 5.1.0
 **Target Audience:** ERP Development Team
 **Scope:** Bi-Directional Product & Inventory Synchronization
 
@@ -53,26 +53,28 @@ The ERP mechanism must trigger triggers on specific database events.
   "event_type": "catalog.update",
   "timestamp": "2024-01-20T10:00:00Z",
   "data": {
-    "group_id": "GRP-101",          // Parent Style ID (e.g. Shirt Style A)
-    "group_name": "Premium Cotton Shirt",
-    "description": "Full product description...",
-    "category_path": ["Men", "Apparel", "Formal"], 
-    "tax_code": "HSN-8899",         // Tax classification code
+    "group_id": "GRP-UAV-X1",       // Parent Style ID (e.g. Model Series)
+    "group_name": "Falcon X1 Quadcopter",
+    "description": "High-performance UAV with 4K Camera...",
+    "category_path": ["Drones", "Professional", "Aerial Photography"], 
+    "tax_code": "HSN-8802",         // Tax classification code for Helicopters/UAVs
     "is_active": true,
     "variants": [                   // List of sellable SKUs
       {
-        "sku": "SHIRT-A-WHT-L",     // UNIQUE Identifier
-        "variant_title": "White - Large",
-        "selling_price": 2500.00,
-        "mrp": 2999.00,
-        "current_stock": 100,       // Absolute stock level
+        "sku": "DRONE-X1-PRO-KIT",  // UNIQUE Identifier
+        "variant_title": "Pro Kit (Extra Battery + Case)",
+        "selling_price": 45000.00,
+        "mrp": 55000.00,
+        "current_stock": 15,        // Absolute stock level
         "specifications": {         // Dynamic attributes
-          "Color": "White",
-          "Size": "L",
-          "Material": "Cotton"
+          "Flight Time": "30 mins",
+          "Range": "5 km",
+          "Camera": "4K 60fps",
+          "Battery": "5000mAh"
         },
         "media_assets": [           // Public URLs for images
-          "https://storage.erp-system.com/img/shirt-wht-1.jpg"
+          "https://storage.example.com/img/x1-drone-main.jpg",
+          "https://storage.example.com/img/x1-controller.jpg"
         ]
       }
     ]
@@ -90,9 +92,9 @@ The ERP mechanism must trigger triggers on specific database events.
   "event_type": "inventory.change",
   "timestamp": "2024-01-20T10:05:00Z",
   "data": {
-    "sku": "SHIRT-A-WHT-L",
-    "location_code": "WH-MAIN",
-    "new_quantity": 99,             // The updated absolute quantity
+    "sku": "DRONE-X1-PRO-KIT",
+    "location_code": "WH-TECH-01",
+    "new_quantity": 14,             // The updated absolute quantity
     "change_reason": "POS_SALE"
   }
 }
@@ -112,7 +114,7 @@ The ERP must provide endpoints to accept transactional data from online sales.
 **Payload Specification:**
 ```json
 {
-  "transaction_id": "ORD-WEB-2024-555",
+  "transaction_id": "ORD-WEB-2024-999",
   "transaction_date": "2024-01-20T10:15:00Z",
   "customer_details": {
     "name": "Jane Doe",
@@ -120,9 +122,14 @@ The ERP must provide endpoints to accept transactional data from online sales.
   },
   "line_items": [
     {
-      "sku": "SHIRT-A-WHT-L",
+      "sku": "DRONE-X1-PRO-KIT",
+      "quantity": 1,
+      "unit_price": 45000.00
+    },
+    {
+      "sku": "PROP-GUARD-X1",
       "quantity": 2,
-      "unit_price": 2500.00
+      "unit_price": 500.00
     }
   ]
 }
@@ -135,12 +142,17 @@ If full order ingestion is complex, a minimal "Stock Deduction" endpoint is acce
 **Payload Specification:**
 ```json
 {
-  "reference_id": "ORD-WEB-2024-555",
+  "reference_id": "ORD-WEB-2024-999",
   "adjustments": [
     {
-      "sku": "SHIRT-A-WHT-L",
+      "sku": "DRONE-X1-PRO-KIT",
+      "quantity_change": -1,
+      "location_code": "WH-TECH-01"
+    },
+    {
+      "sku": "PROP-GUARD-X1",
       "quantity_change": -2,
-      "location_code": "WH-MAIN"
+      "location_code": "WH-TECH-01"
     }
   ]
 }
@@ -159,8 +171,8 @@ To handle network outages or missed webhooks, we require a **Reconciliation Endp
 **Expected Response:**
 ```json
 [
-  { "sku": "SHIRT-A-WHT-L", "qty": 99 },
-  { "sku": "SHIRT-A-WHT-M", "qty": 45 },
+  { "sku": "DRONE-X1-PRO-KIT", "qty": 14 },
+  { "sku": "PROP-GUARD-X1", "qty": 105 },
   ...
 ]
 ```
