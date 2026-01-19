@@ -1,309 +1,236 @@
-# Comprehensive ERP Integration Technical Specification
-**Version:** 2.0.0
+# Comprehensive ERP Integration Specification: Bi-Directional Product & Inventory Sync
+**Version:** 4.0.0
 **Status:** DRAFT
-**Target Audience:** ERP Development Team, System Architects
-**Date:** 2024-01-20
+**Target Audience:** ERP Development Team / System Architects
+**Scope:** Product Catalog, Real-Time Inventory, Stock Deduction
 
 ---
 
-## **1. Executive Summary**
+## **1. Executive Summary & Architecture**
 
-This document serves as the authoritative technical reference for integrating the organization's legacy Enterprise Resource Planning (ERP) system with the new Elight E-Commerce Platform. 
+### **1.1 The Objective**
+We are building a unified commerce ecosystem where the **Legacy ERP** and the **New Elight E-Commerce Platform** act as synchronized nodes for inventory and product data. 
 
-The integration logic rests on a fundamental principle: **The ERP is the Source of Truth** for catalog (Products, Inventory, Pricing) data, while the **E-Commerce Platform is the Source of Truth** for customer-generated transactional data (Orders, Returns) until internalized by the ERP.
+**The Golden Rules of Sync:**
+1.  **Product Master**: The ERP is the source of truth for *what* we sell (SKUs, Names, Prices).
+2.  **Shared Inventory**: The ERP manages the *Master Stock*.
+    *   **Offline Sale**: If stock moves in ERP (e.g., in-store sale), the E-commerce DB must update immediately.
+    *   **Online Sale**: If stock moves in E-commerce (website order), the ERP Master Stock must update immediately to prevent double-selling.
 
-This specification outlines the interface contracts, data models, security protocols, and operational workflows required to achieve a near real-time, bi-directional synchronization.
+### **1.2 High-Level Architecture**
+To achieve this, we require a **Bi-Directional Interface**:
 
----
-
-## **2. System Architecture & Protocols**
-
-### 2.1 Communication Pattern
-To minimize latency and avoid polling overhead, the integration relies primarily on **Event-Driven Architecture (Webhooks)** for ERP-to-Commerce updates, supplemented by **RESTful APIs** for Commerce-to-ERP transactions and nightly reconciliation.
-
-*   **ERP -> Commerce**: ERP pushes data via HTTP POST Webhooks immediately upon record modification (Create/Update/Delete).
-*   **Commerce -> ERP**: Commerce pushes transactional data (Orders) via REST API immediately upon creation.
-*   **Reconciliation**: A scheduled batch job (ETL) runs nightly to verify data integrity and correct drift.
-
-### 2.2 Security & Authentication
-All communication must be secured over **HTTPS (TLS 1.2+)**.
-
-#### 2.2.1 Webhook Security (ERP -> Commerce)
-To ensure that payloads received by the E-commerce system legitimately originate from the ERP, all webhook requests must include an **HMAC-SHA256 Signature**.
-*   **Method**: `POST`
-*   **Header**: `X-ERP-Signature`
-*   **Algorithm**: `HMAC-SHA256(body, secret_key)`
-*   **Secret Key**: A 64-character random string shared securely between teams (Do not commit to code).
-
-**Implementation Requirement:** The ERP must generate this signature for every request. The Commerce system will reject any request with an invalid or missing signature.
-
-#### 2.2.2 API Authentication (Commerce -> ERP)
-For the E-commerce system to push orders to the ERP, the ERP must provide a secure REST API protected by **OAuth 2.0 (Client Credentials Flow)** or, at minimum, high-entropy **API Keys**.
-*   **Header**: `Authorization: Bearer <token>` or `X-API-Key: <key>`
-
-### 2.3 Idempotency & Reliability
-Networks are unreliable. The ERP must implement **Retry Logic** with **Exponential Backoff** for all webhooks.
-*   **Retry Schedule**: Immediately, 30s, 5m, 1h, 6h, 24h.
-*   **Idempotency**: All payloads must include a unique `event_id`. The Commerce system will cache this ID for 72 hours to prevent processing duplicate messages if a retry occurs after a successful processing acknowledgement was lost.
+*   **Inbound (ERP -> Commerce)**: The ERP pushes `Product Updates` and `Inventory Changes` via **HTTP Webhooks**. This ensures the website always reflects the warehouse reality.
+*   **Outbound (Commerce -> ERP)**: The Commerce system pushes `Sales Signals` (Order/Inventory Deduction) via **REST API** to the ERP. This ensures the ERP reserves stock for online buyers.
 
 ---
 
-## **3. Data Dictionary: Product Catalog**
+## **2. Detailed Interface Specifications**
 
-### 3.1 Concept Mapping
-| ERP Entity | Commerce Entity | Notes |
-| :--- | :--- | :--- |
-| Item/SKU | Product Variant | The sellable unit. Unique SKU is mandatory. |
-| Style/Group | Product | The parent container for variants (e.g., "T-Shirt" containing Red/Blue variants). |
-| Category | Collection/Category | Categories are hierarchical. |
-| Warehouse | Inventory Location | Multi-warehouse stock mapping. |
+### **2.1 Security & Authentication**
+All exchanges must occur over **HTTPS**.
 
-### 3.2 Field Specifications (ERP -> Commerce)
-The ERP **MUST** provide the following fields in the `product.update` webhook.
+*   **For Webhooks (ERP -> Commerce)**:
+    *   **Mechanism**: HMAC Signature.
+    *   **Header**: `X-ERP-Signature`
+    *   **Algorithm**: `HMAC-SHA256(request_body, shared_secret)`
+    *   **Reason**: Prevents replay attacks and ensures payload integrity.
 
-#### 3.2.1 Core Identity
-*   `sku` (String, Max 64, **PK**): The immutable unique identifier. e.g., "NK-AM-BLK-10".
-*   `group_id` (String, Max 64, Optional): The ID of the parent style. If null, product is standalone.
-*   `barcode` (String, Max 20, Optional): EAN/UPC/GTIN for scanning.
-
-#### 3.2.2 Descriptive Data
-*   `name` (String, Max 255): The consumer-facing product title. e.g., "Nike Air Max 90 - Black".
-*   `description_html` (Text): Full product description. Support for HTML tags (`<p>`, `<ul>`, `<li>`, `<b>`) is required.
-*   `short_description` (String, Max 500): SEO meta description or collection page summary.
-*   `attributes` (JSON Object): Flexible key-value pairs for filtering.
-    *   Example: `{"Material": "Leather", "Season": "SS24", "Gender": "Unisex"}`
-*   `variant_options` (JSON Array): Defining attributes for the variant.
-    *   Example: `[{"name": "Size", "value": "10"}, {"name": "Color", "value": "Black"}]`
-
-#### 3.2.3 Commercial Data
-*   `price` (Decimal, 10,2): The selling price excluding tax. e.g., `2499.00`.
-*   `mrp` (Decimal, 10,2): The "Strike-through" price (MRP/RRP). e.g., `2999.00`.
-*   `cost_price` (Decimal, 10,2, **Internal Only**): For margin calculation (Do not enable if sensitive).
-*   `tax_hsn` (String, Max 10): Harmonized System Nomenclature (HSN) code for GST.
-*   `tax_rate` (Decimal, 4,2): The applicable tax percentage (e.g., `18.00`).
-
-#### 3.2.4 Media Requirements
-*   `images` (Array of Strings): An ordered list of PUBLICLY ACCESSIBLE URLs.
-    *   **Constraint**: The ERP must host images or push them to a CDN. The Commerce system will download and cache them. Sending Base64 streams is **NOT** supported due to payload size limits.
-
-#### 3.2.5 Logistics
-*   `weight_kg` (Decimal, 6,3): e.g., `0.450`.
-*   `dimensions_cm` (Object): `{ "length": 30, "width": 20, "height": 10 }`.
+*   **For API Calls (Commerce -> ERP)**:
+    *   **Mechanism**: API Key or Bearer Token.
+    *   **Header**: `Authorization: Bearer <token>`
+    *   **Reason**: Authenticates the E-commerce server as a trusted client.
 
 ---
 
-## **4. Data Dictionary: Inventory**
+## **3. Inbound Data Requirements (ERP -> Commerce)**
 
-Inventory is the most time-sensitive data point. The ERP must push "delta" updates immediately.
+The ERP must implement the following **Webhooks**. These are strictly "Push" events triggered by database changes in the ERP.
 
-### 4.1 Multi-Location Support
-If the ERP manages multiple warehouses (e.g., "Main Warehouse", "Retail Store 01"), the inventory payload must specify the `location_id`.
+### **3.1 Event: `catalog.update`**
+**Trigger**: When a Product is Created, Updated, or Deleted in ERP.
+**Requirement**: Send the full product object. Partial updates are discouraged to avoid data inconsistency.
 
-### 4.2 Payload Specification
-**Event Name**: `inventory.update`
+**Payload Schema:**
 ```json
 {
-  "event_id": "evt_123456789",
-  "occurred_at": "2024-01-20T14:30:00Z",
-  "sku": "NK-AM-BLK-10",
-  "total_available": 45,
-  "breakdown": [
+  "event_id": "evt_550e8400-e29b",
+  "event_type": "catalog.update",
+  "timestamp": "2024-01-20T10:00:00Z",
+  "data": {
+    "product_group_id": "PG-1001",    // Groups variants (e.g., iPhone 15)
+    "group_name": "iPhone 15",        // Name of the group
+    "description": "<p>Full HTML...</p>",
+    "category_hierarchy": ["Electronics", "Smartphones", "Apple"], 
+    "tax_hsn": "85171300",            // Global tax code for the group
+    "is_active": true,
+    "variants": [
+      {
+        "sku": "IPH15-128-BLK",       // PRIMARY KEY
+        "display_name": "iPhone 15 128GB Black",
+        "price": 79900.00,            // Base Selling Price (Excl Tax)
+        "mrp": 89900.00,              // Max Retail Price
+        "stock_quantity": 50,         // Current Global Stock
+        "attributes": {               // Custom Filters
+          "Color": "Black",
+          "Storage": "128GB"
+        },
+        "media": [                    // Publicly accessible URLs
+          { "url": "https://erp-cdn.com/u/iph15-blk.jpg", "is_main": true },
+          { "url": "https://erp-cdn.com/u/iph15-blk-back.jpg", "is_main": false }
+        ]
+      },
+      {
+        "sku": "IPH15-128-BLU",
+        "display_name": "iPhone 15 128GB Blue",
+        "price": 79900.00,
+        "stock_quantity": 42,
+        "attributes": { "Color": "Blue", "Storage": "128GB" },
+        "media": [...]
+      }
+    ]
+  }
+}
+```
+
+#### **Field Dictionary**
+| Field | Data Type | Constraint | Description |
+| :--- | :--- | :--- | :--- |
+| `product_group_id` | String | Max 50 chars | Identifier linking variants. If product has no variants, use SKU. |
+| `sku` | String | **UNIQUE** | The immutable ID. Critical for mapping. |
+| `price` | Decimal | Precision 2 | Selling price. |
+| `attributes` | JSON Object | Dynamic | Used for "Filter By" features on the website. |
+| `media` | Array | Min 1 item | URLs must be public. Commerce server will confirm download. |
+
+---
+
+### **3.2 Event: `inventory.change`**
+**Trigger**: ANY change in stock level in the ERP (e.g., POS sale, Stock Adjustment, Return, Goods Receipt).
+**Requirement**: Must be fired within **5 seconds** of the transaction to strictly minimize "Out of Stock" order risk.
+**Payload**: Can be a "Delta" (Change) or "Absolute" (Total). **Absolute is preferred** to fix drift.
+
+**Payload Schema:**
+```json
+{
+  "event_id": "evt_inventory_8899",
+  "event_type": "inventory.change",
+  "timestamp": "2024-01-20T10:05:00Z",
+  "data": {
+    "sku": "IPH15-128-BLK",
+    "location_id": "WH-MAIN",       // Optional: Context on where stock moved
+    "new_quantity": 49,             // The NEW total available stock
+    "reason": "POS_SALE"            // Optional: Why it changed
+  }
+}
+```
+
+**Operational Scenario:**
+1.  Customer walks into store, buys 1x `IPH15-128-BLK`.
+2.  ERP Stock goes 50 -> 49.
+3.  ERP fires `inventory.change` webhook.
+4.  Commerce receives payload -> Updates DB -> Website now shows "49 Left".
+
+---
+
+## **4. Outbound Data Requirements (Commerce -> ERP)**
+
+The E-commerce system needs to notify the ERP when it sells an item so the ERP can reserve/deduct that stock from the global pool.
+
+**Requirement**: The ERP **MUST** expose a REST Endpoint for this.
+
+### **Option A: Full Order Sync (Recommended)**
+Standard approach. Allows ERP to generate Invoice and Shipping Labels.
+
+**Endpoint**: `POST /api/v1/orders/import`
+**Payload**:
+```json
+{
+  "order_id": "ORD-WEB-1001",
+  "order_date": "2024-01-20T10:15:00Z",
+  "customer_ref": "CUST-555",
+  "line_items": [
     {
-      "location_id": "WH-001",
-      "quantity": 40,
-      "reserved": 0
-    },
-    {
-      "location_id": "STR-005",
-      "quantity": 5,
-      "reserved": 2
+      "sku": "IPH15-128-BLK",
+      "quantity": 1,
+      "unit_price": 79900.00
     }
   ]
 }
 ```
-*   **Logic**: The E-commerce system will sum the `quantity` from all mappable locations to determine "Sellable Online Stock".
 
----
+### **Option B: Inventory Deduction Only (Minimum Viable)**
+If the ERP team cannot ingest full orders yet, we need a simple "Reserve Stock" endpoint.
 
-## **5. Webhook Specifications (ERP -> Commerce)**
+**Endpoint**: `POST /api/v1/inventory/adjust`
+**Side Effect**: ERP decreases stock by `quantity`.
 
-The following Webhook Events are mandatorily required.
-
-### 5.1 `product.created` / `product.updated`
-Triggered when a product is created or ANY field listed in Section 3.2 is modified.
-**Endpoint**: `/api/webhooks/erp/products`
-**Payload Schema**:
+**Payload**:
 ```json
 {
-  "event": "product.update",
-  "data": {
-    "sku": "SHOE-001",
-    "active": true,
-    "identity": {
-      "name": "Leather Shoe",
-      "group_id": "GRP-SHOE-A",
-      "barcode": "8901234567890"
-    },
-    "commerical": {
-      "price": 2500.00,
-      "mrp": 3000.00,
-      "tax_code": "6403"
-    },
-    "attributes": {
-      "Color": "Brown",
-      "Material": "Leather"
-    }
-  }
-}
-```
-
-### 5.2 `price.updated`
-Triggered when ONLY price changes (optimization for high-frequency updates).
-**Endpoint**: `/api/webhooks/erp/prices`
-**Payload Schema**:
-```json
-{
-  "event": "price.update",
-  "data": {
-    "sku": "SHOE-001",
-    "price": 2400.00,
-    "sale_price": null,
-    "currency": "INR",
-    "effective_date": "2024-01-20T00:00:00Z"
-  }
-}
-```
-
-### 5.3 `inventory.updated`
-(See Section 4.2)
-
----
-
-## **6. API Specifications (Commerce -> ERP)**
-
-The ERP must expose these endpoints.
-
-### 6.1 Order Insertion
-**Method**: `POST`
-**Endpoint**: `/api/orders`
-**Description**: Called when a customer completes checkout successfully.
-**Payload Schema**:
-```json
-{
-  "commerce_order_id": "ORD-2401-001",
-  "order_date": "2024-01-20T15:00:00Z",
-  "customer": {
-    "commerce_id": "CUST-999",
-    "email": "customer@example.com",
-    "phone": "+919876543210",
-    "first_name": "Rahul",
-    "last_name": "Sharma"
-  },
-  "billing_address": {
-    "line1": "Flat 101, Galaxy Apts",
-    "city": "Mumbai",
-    "state": "Maharashtra",
-    "pincode": "400001",
-    "country": "IN",
-    "gstin": "27ABCDE1234F1Z5" // Optional B2B
-  },
-  "shipping_address": { ... },
-  "items": [
+  "reference_id": "ORD-WEB-1001",
+  "adjustments": [
     {
-      "sku": "NK-AM-BLK-10",
-      "quantity": 1,
-      "unit_price": 2500.00,
-      "tax_amount": 450.00,
-      "total": 2950.00
+      "sku": "IPH15-128-BLK",
+      "quantity_change": -1,   // Negative to deduct
+      "warehouse_id": "WH-MAIN"
     }
-  ],
-  "financials": {
-    "subtotal": 2500.00,
-    "tax_total": 450.00,
-    "shipping_fee": 100.00,
-    "discount_total": 0.00,
-    "grand_total": 3050.00,
-    "payment_method": "Razorpay",
-    "payment_ref": "pay_O123456789"
-  }
+  ]
 }
 ```
-**Expected Response**:
-*   `201 Created`: `{ "erp_order_id": "SO-230055", "status": "Booked" }`
-*   `400 Bad Request`: `{ "error": "Invalid SKU NK-AM-BLK-10" }` (Commerce will log this as a critical error requiring human intervention).
-
-### 6.2 Order Cancellation
-**Method**: `POST`
-**Endpoint**: `/api/orders/{erp_order_id}/cancel`
-**Description**: Called if customer cancels before shipping.
 
 ---
 
-## **7. Error Handling & Recovery**
+## **5. Data Integrity & Reconcilliation**
 
-### 7.1 Webhook Failure Scenarios (ERP -> Commerce)
-If the Commerce system returns `4xx` or `5xx`:
-1.  **ERP Action**: Log the error, Mark event for Retry.
-2.  **Retry Policy**: Execute Exponential Backoff (Section 2.3).
-3.  **Dead Letter Queue**: After 5 failed attempts, move to DLQ and alert ERP admin.
+Since webhooks can fail, we need a fallback mechanism.
 
-### 7.2 API Failure Scenarios (Commerce -> ERP)
-If the Order Push fails:
-1.  **Commerce Action**: Mark local order status as `Sync Failed`.
-2.  **Retry**: Commerce cron job will retry syncing `Sync Failed` orders every 5 minutes for 1 hour.
-3.  **Alert**: If fail persists > 1 hour, email alert sent to SysAdmin.
-
----
-
-## **8. Reconciliation (Nightly Batch)**
-
-A "Safety Net" process is required to handle missed webhooks or race conditions.
-
-### 8.1 Full Inventory Sync
-**Direction**: Commerce pulls from ERP.
-**Schedule**: 02:00 AM IST.
-**Endpoint**: `GET /api/inventory/snapshot` (ERP Endpoint)
-**Logic**: Commerce downloads a CSV/JSON dump of ALL SKU stock levels. Overwrites local database values with ERP values.
-
-### 8.2 Full Price Sync
-**Direction**: Commerce pulls from ERP.
-**Schedule**: 03:00 AM IST.
-**Endpoint**: `GET /api/prices/snapshot`
-**Logic**: Updates base price and tax info for all SKUs.
+### **5.1 The "Nightly Sweeper"**
+**Requirement**: ERP must expose an endpoint to fetch ALL stock levels.
+**Endpoint**: `GET /api/v1/inventory/snapshot`
+**Response**: JSON Stream or CSV file URL.
+```json
+[
+  { "sku": "A", "qty": 10 },
+  { "sku": "B", "qty": 0 },
+  ...
+]
+```
+**Process**: Every night at 3 AM, Commerce calls this, compares with its DB, and overwrites any mismatches.
 
 ---
 
-## **9. Implementation Roadmap**
+## **6. Technical Checklist for ERP Team**
 
-### Phase 1: Preparation (Active)
-*   [ ] Agree on security keys (API Secrets).
-*   [ ] ERP Team provides static list of Categories and Tax Codes for mapping.
-*   [ ] Network: Allowlisting IPs between ERP server and Commerce server.
+Please mark availability for the following:
 
-### Phase 2: Development
-*   [ ] ERP implements `product` and `inventory` webhooks.
-*   [ ] Commerce implements Webhook Receiver endpoints.
-*   [ ] Commerce implements Order Push client.
-*   [ ] ERP implements Order Receive endpoint.
-
-### Phase 3: Testing (UAT)
-*   [ ] **Test Case 1**: Create Product in ERP -> Verify appearing on Website within 5 seconds.
-*   [ ] **Test Case 2**: Change Price in ERP -> Verify updated implementation on Website.
-*   [ ] **Test Case 3**: Place Order on Website -> Verify Sales Order created in ERP.
-*   [ ] **Test Case 4**: Reduce Stock to 0 in ERP -> Verify Product "Out of Stock" on Website.
-*   [ ] **Test Case 5**: Simulate Network Failure -> Verify Retry mechanism delivers payload after recovery.
+1.  **Webhooks Engine**: Can you trigger HTTP POST on database events? [ ] Yes [ ] No
+2.  **API Access**: Can you provide an API Key for us to POST orders/stock? [ ] Yes [ ] No
+3.  **Image Hosting**: Are product images accessible via public URL? [ ] Yes [ ] No
+4.  **SKU Stability**: Is the SKU field static? (It must not change over the product's life). [ ] Yes [ ] No
+5.  **Environment**: 
+    *   **Staging/Test ERP URL**: ________________________
+    *   **Production ERP URL**: ________________________
 
 ---
 
-## **10. Appendix: Data Mapping Tables**
+## **7. Error Handling Specification**
 
-### 10.1 Tax Codes
-| ERP Tax Code | GST Rate | Description |
-| :--- | :--- | :--- |
-| `GST0` | 0% | Exempt Goods |
-| `GST5` | 5% | Essentials |
-| `GST12` | 12% | Standard Tier 1 |
-| `GST18` | 18% | Standard Tier 2 |
-| `GST28` | 28% | Luxury Goods |
+### **7.1 Retry Logic (ERP Side)**
+If the Commerce Webhook Endpoint returns `500`, `502`, `503`, or `504` (Server Error):
+*   **Action**: The ERP must Queue the event and Retry.
+*   **Strategy**: Exponential Backoff (1m, 5m, 15m, 1h, 6h).
+*   **Alert**: Failure after 24h sends email to Admin.
 
-*(This table must be populated by ERP Finance Team)*
+If the Commerce Endpoint returns `400` (Bad Request):
+*   **Action**: Do NOT retry. Log "Data Error" (e.g., Invalid JSON, Missing SKU).
+
+### **7.2 Order Push Failure (Commerce Side)**
+If the `POST /orders` call to ERP fails:
+*   **Action**: Commerce marks order as "Pending Sync".
+*   **Retry**: Retries every 15 mins for 2 hours.
+*   **Fallback**: If ERP is down > 2 hours, stock is reserved locally only. Synchronization happens once ERP is back online.
+
+---
+
+**End of Specification**
+**Prepared By:** Elight Commerce Team
