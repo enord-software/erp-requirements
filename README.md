@@ -27,4 +27,5 @@ The ERP is also used internally by the Enord team for various business operation
 
 ---
 
-*For technical details, please refer to the [ERP API Requirements](ERP_API_REQUIREMENTS.md) document.*
+*For technical details, please refer to the [ERP API Requirements](REQUIREMENTS.md) document.*
+
