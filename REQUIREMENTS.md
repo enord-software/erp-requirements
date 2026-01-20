@@ -1,9 +1,6 @@
 # ERP API Requirements — Product & Inventory Integration
-
-**Company:** Enord Pvt. Ltd.  
+ 
 **Document Type:** Integration Requirements  
-**Status:** Final  
-**Date:** January 20, 2026
 
  
 
